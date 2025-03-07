@@ -653,32 +653,32 @@ void GameEngine::execute( void )
 #endif
 			
 			{
-				try 
-				{
+				//try 
+				//{
 					// compute a frame
 					update();
-				}
-				catch (INIException e)
-				{
-					// Release CRASH doesn't return, so don't worry about executing additional code.
-					if (e.mFailureMessage)
-						RELEASE_CRASH((e.mFailureMessage));
-					else
-						RELEASE_CRASH(("Uncaught Exception in GameEngine::update"));
-				}
-				catch (...)
-				{
-					// try to save info off
-					try 
-					{
-						if (TheRecorder && TheRecorder->getMode() == RECORDERMODETYPE_RECORD && TheRecorder->isMultiplayer())
-							TheRecorder->cleanUpReplayFile();
-					}
-					catch (...)
-					{
-					}
-					RELEASE_CRASH(("Uncaught Exception in GameEngine::update"));
-				}	// catch
+				//}
+				//catch (INIException e)
+				//{
+				//	// Release CRASH doesn't return, so don't worry about executing additional code.
+				//	if (e.mFailureMessage)
+				//		RELEASE_CRASH((e.mFailureMessage));
+				//	else
+				//		RELEASE_CRASH(("Uncaught Exception in GameEngine::update"));
+				//}
+				//catch (...)
+				//{
+				//	// try to save info off
+				//	try 
+				//	{
+				//		if (TheRecorder && TheRecorder->getMode() == RECORDERMODETYPE_RECORD && TheRecorder->isMultiplayer())
+				//			TheRecorder->cleanUpReplayFile();
+				//	}
+				//	catch (...)
+				//	{
+				//	}
+				//	RELEASE_CRASH(("Uncaught Exception in GameEngine::update"));
+				//}	// catch
 			}	// perf
 
 			{
@@ -932,4 +932,4 @@ void updateTGAtoDDS()
 // If we're using the Wide character version of MessageBox, then there's no additional
 // processing necessary. Please note that this is a sleazy way to get this information,
 // but pending a better one, this'll have to do.
-extern const Bool TheSystemIsUnicode = (((void*) (::MessageBox)) == ((void*) (::MessageBoxW)));
+extern const Bool TheSystemIsUnicode = TRUE;

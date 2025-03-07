@@ -1386,9 +1386,7 @@ void RailroadBehavior::FindPosByPathDistance( Coord3D *pos, const Real dist, con
 	{
 		const TrackPoint *thisPoint = &(*pointIter);
 		++pointIter;// next pointIter in this list, so then...
-		if ( pointIter == pointList->end() )
-			break; // dereferencing end-list iterators is sooooo 2003
-		const TrackPoint *nextPoint = &(*pointIter);
+		const TrackPoint *nextPoint = (pointIter != pointList->end()) ? &(*pointIter) : NULL;
 
 
 		if (thisPoint && thisPoint->m_distanceFromFirst < actualDistance)// I am after this point, and

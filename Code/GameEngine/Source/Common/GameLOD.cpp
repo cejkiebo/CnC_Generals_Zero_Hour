@@ -50,7 +50,7 @@
 #define PROFILE_ERROR_LIMIT	0.94f	//fraction of profiled result needed to get a match.  Allows some room for error/fluctuation.
 
 //Hack to get access to a static method on the W3DDevice side. -MW
-extern Bool testMinimumRequirements(ChipsetType *videoChipType, CpuType *cpuType, Int *cpuFreq, Int *numRAM, Real *intBenchIndex, Real *floatBenchIndex, Real *memBenchIndex);
+extern Bool testMinimumRequirements(ChipsetType *videoChipType, CpuType *cpuType, Int *cpuFreq, UnsignedInt *numRAM, Real *intBenchIndex, Real *floatBenchIndex, Real *memBenchIndex);
 
 GameLODManager *TheGameLODManager=NULL;
 
@@ -286,8 +286,10 @@ void GameLODManager::init(void)
 	//always get this data in case we need it later.
 	testMinimumRequirements(NULL,&m_cpuType,&m_cpuFreq,&m_numRAM,NULL,NULL,NULL);
 
-	if ((Real)(m_numRAM)/(Real)(256*1024*1024) >= PROFILE_ERROR_LIMIT)
-		m_memPassed=TRUE;	//check if they have at least 256 MB
+// jmarshall - memcheck always passes
+	//if ((Real)(m_numRAM)/(Real)(256*1024*1024) >= PROFILE_ERROR_LIMIT)
+	m_memPassed=TRUE;	//check if they have at least 256 MB
+// jmarshall end
 
 	if (m_idealDetailLevel == STATIC_GAME_LOD_UNKNOWN || TheGlobalData->m_forceBenchmark)
 	{
