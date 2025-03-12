@@ -110,6 +110,8 @@ D3DMATRIX						DX8Wrapper::old_world;
 D3DMATRIX						DX8Wrapper::old_view;
 D3DMATRIX						DX8Wrapper::old_prj;
 
+tr_renderer* DX8Wrapper::D3D12Renderer;
+
 bool								DX8Wrapper::world_identity;
 unsigned							DX8Wrapper::RenderStates[256];
 unsigned							DX8Wrapper::TextureStageStates[MAX_TEXTURE_STAGES][32];
@@ -125,7 +127,7 @@ IDirect3DDevice8 *			DX8Wrapper::D3DDevice									= NULL;
 IDirect3DSurface8 *			DX8Wrapper::CurrentRenderTarget						= NULL;
 IDirect3DSurface8 *			DX8Wrapper::DefaultRenderTarget						= NULL;
 IDirect3DDevice9On12*		DX8Wrapper::device9On12 = NULL;
-ID3D12Device* DX8Wrapper::D3D12Device = NULL;
+
 int DX8Wrapper::numDeviceVertexShaders = 0;
 DeviceVertexShader DX8Wrapper::deviceVertexShaders[256];
 
@@ -267,18 +269,17 @@ bool DX8Wrapper::Init(void * hwnd)
 	*/
 
 // jmarshall - d3d9on12
-	//D3DInterface = Direct3DCreate8(D3D_SDK_VERSION);		// TODO: handle failure cases...
-	//if (!D3DInterface)
-	//	return false;
-	D3D9ON12_ARGS dArgs;
-	ID3D12Device* d3d12 = NULL;
+	tr_renderer_settings settings = {};
+	tr_create_renderer("Command and Conquer Generals", &settings, &D3D12Renderer);
 
-	D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12));
-	LUID adapter_LUID = d3d12->GetAdapterLuid();
-	ZeroMemory(&dArgs, sizeof(D3D9ON12_ARGS));
-	dArgs.Enable9On12 = TRUE;
-	dArgs.pD3D12Device = d3d12;
-	D3DInterface = Direct3DCreate9On12(D3D_SDK_VERSION, &dArgs, 1);
+	LUID adapter_LUID = D3D12Renderer->dx_device->GetAdapterLuid();
+	D3D9ON12_ARGS d3d9On12Args = {};
+	d3d9On12Args.Enable9On12 = TRUE;
+	d3d9On12Args.pD3D12Device = D3D12Renderer->dx_device;
+	d3d9On12Args.ppD3D12Queues[0] = D3D12Renderer->graphics_queue->dx_queue; // pointer to our queue
+	d3d9On12Args.NumQueues = 1;
+	d3d9On12Args.NodeMask = 0; // Single-GPU scenario
+	D3DInterface = Direct3DCreate9On12(D3D_SDK_VERSION, &d3d9On12Args, 1);
 // jmarshall end
 	
 	IsInitted = true;	
@@ -488,8 +489,6 @@ bool DX8Wrapper::Create_Device(void)
 	}
 
 	D3DDevice->QueryInterface(IID_PPV_ARGS(&device9On12));
-	device9On12->GetD3D12Device(IID_PPV_ARGS(&D3D12Device));
-
 	D3DDevice->SetRenderState(D3DRS_POINTSIZE_MIN, (DWORD)0.0f);
 
 	/*
@@ -2060,56 +2059,6 @@ IDirect3DTexture8 * DX8Wrapper::_Create_DX8_Texture(
 //	unsigned level_count=texture->GetLevelCount();
 //	if (reduction>=level_count) reduction=level_count-1;
 //	texture->SetLOD(reduction);
-
-	return texture;
-}
-
-IDirect3DTexture8 * DX8Wrapper::_Create_DX8_Texture(
-	const char *filename, 
-	TextureClass::MipCountType mip_level_count)
-{
-	DX8_THREAD_ASSERT();
-	DX8_Assert();
-	IDirect3DTexture8 *texture = NULL;
-
-	// NOTE: If the original image format is not supported as a texture format, it will
-	// automatically be converted to an appropriate format.
-	// NOTE: It is possible to get the size and format of the original image file from this
-	// function as well, so if we later want to second-guess D3DX's format conversion decisions
-	// we can do so after this function is called..
-	unsigned result = D3DXCreateTextureFromFileExA(
-		DX8Wrapper::D3DDevice, 
-		filename,
-		D3DX_DEFAULT, 
-		D3DX_DEFAULT, 
-		mip_level_count,//create_mipmaps ? 0 : 1, 
-		0, 
-		D3DFMT_UNKNOWN, 
-		D3DPOOL_MANAGED,
-		D3DX_FILTER_BOX, 
-		D3DX_FILTER_BOX, 
-		0, 
-		NULL, 
-		NULL, 
-		&texture);
-	
-	if (result != D3D_OK) {
-		return MissingTexture::_Get_Missing_Texture();
-	}
-
-	// Make sure texture wasn't paletted!
-	D3DSURFACE_DESC desc;
-	texture->GetLevelDesc(0,&desc);
-	if (desc.Format==D3DFMT_P8) {
-		texture->Release();
-		return MissingTexture::_Get_Missing_Texture();
-	}
-	else {
-//		unsigned reduction=WW3D::Get_Texture_Reduction();
-//		unsigned level_count=texture->GetLevelCount();
-//		if (reduction>=level_count) reduction=level_count-1;
-//		texture->SetLOD(reduction);
-	}
 
 	return texture;
 }

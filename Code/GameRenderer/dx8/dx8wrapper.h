@@ -59,6 +59,8 @@
 #include "dx8indexbuffer.h"
 #include "vertmaterial.h"
 
+#include "../dx12/tinydx.h"
+
 #include <vector>
 
 const unsigned MAX_TEXTURE_STAGES=2;
@@ -338,8 +340,7 @@ public:
 		TextureClass::MipCountType mip_level_count,
 		D3DPOOL pool=D3DPOOL_MANAGED,
 		bool rendertarget=false);
-	static IDirect3DTexture8 * _Create_DX8_Texture(const char *filename, TextureClass::MipCountType mip_level_count);
-	static IDirect3DTexture8 * _Create_DX8_Texture(IDirect3DSurface8 *surface, TextureClass::MipCountType mip_level_count);
+		static IDirect3DTexture8 * _Create_DX8_Texture(IDirect3DSurface8 *surface, TextureClass::MipCountType mip_level_count);
 
 	static IDirect3DSurface8 * _Create_DX8_Surface(unsigned int width, unsigned int height, WW3DFormat format);
 	static IDirect3DSurface8 * _Create_DX8_Surface(const char *filename);
@@ -676,12 +677,12 @@ protected:
 
 	static IDirect3D8 *					D3DInterface;			//d3d8;
 	static IDirect3DDevice8 *			D3DDevice;				//d3ddevice8;	
+	static tr_renderer					*D3D12Renderer;
 
 	static IDirect3DSurface8 *			CurrentRenderTarget;
 	static IDirect3DSurface8 *			DefaultRenderTarget;
 
 	static IDirect3DDevice9On12*		device9On12;
-	static ID3D12Device*				D3D12Device;
 
 	friend void DX8_Assert();
 	friend class WW3D;
