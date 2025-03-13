@@ -128,6 +128,10 @@ IDirect3DSurface8 *			DX8Wrapper::CurrentRenderTarget						= NULL;
 IDirect3DSurface8 *			DX8Wrapper::DefaultRenderTarget						= NULL;
 IDirect3DDevice9On12*		DX8Wrapper::device9On12 = NULL;
 
+LPDIRECT3DSURFACE9			DX8Wrapper::g_pRT_MSAA = NULL;
+PDIRECT3DSURFACE9			DX8Wrapper::g_pDS_MSAA = NULL;
+LPDIRECT3DSURFACE9			DX8Wrapper::g_pRT_Resolved = NULL;
+
 int DX8Wrapper::numDeviceVertexShaders = 0;
 DeviceVertexShader DX8Wrapper::deviceVertexShaders[256];
 
@@ -491,6 +495,10 @@ bool DX8Wrapper::Create_Device(void)
 	D3DDevice->QueryInterface(IID_PPV_ARGS(&device9On12));
 	D3DDevice->SetRenderState(D3DRS_POINTSIZE_MIN, (DWORD)0.0f);
 
+	if (!RecreateGBuffer()) {
+		return false;
+	}
+
 	/*
 	** Initialize all subsystems
 	*/
@@ -498,43 +506,80 @@ bool DX8Wrapper::Create_Device(void)
 	return true;
 }
 
-bool DX8Wrapper::Reset_Device(bool reload_assets)
-{
-	DX8_THREAD_ASSERT();
-	if ((IsInitted) && (D3DDevice != NULL)) {
-		// Release all non-MANAGED stuff
-		Set_Vertex_Buffer (NULL);
-		Set_Index_Buffer (NULL, 0);
-		if (m_pCleanupHook) {
-			m_pCleanupHook->ReleaseResources();
-		}
-		DynamicVBAccessClass::_Deinit();
-		DynamicIBAccessClass::_Deinit();
-		DX8TextureManagerClass::Release_Textures();
+bool DX8Wrapper::RecreateGBuffer(void) {
+	DWORD msQuality = 0;
 
-		HRESULT hr=DX8Wrapper::D3DDevice->TestCooperativeLevel();
-		if (hr != D3DERR_DEVICELOST )
-		{	DX8CALL_HRES(Reset(&_PresentParameters),hr)
-			if (hr != D3D_OK)
-				return false;	//reset failed.
-		}
-		else
-			return false;	//device is lost and can't be reset.
+	if (g_pRT_MSAA)
+	{
+		g_pRT_MSAA->Release();
+		g_pRT_MSAA = nullptr;
 
-		D3DDevice->SetRenderState(D3DRS_POINTSIZE_MIN, (DWORD)0.0f);
+		g_pDS_MSAA->Release();
+		g_pDS_MSAA = nullptr;
 
-		if (reload_assets)
-		{
-			DX8TextureManagerClass::Recreate_Textures();
-			if (m_pCleanupHook) {
-				m_pCleanupHook->ReAcquireResources();
-			}
-		}
-		Invalidate_Cached_Render_States();
-		Set_Default_Global_Render_States();
-		return true;
+		g_pRT_Resolved->Release();
+		g_pRT_Resolved = nullptr;
 	}
-	return false;
+
+	HRESULT hr = D3DInterface->CheckDeviceMultiSampleType(
+		D3DADAPTER_DEFAULT,
+		D3DDEVTYPE_HAL,
+		D3DFMT_X8R8G8B8,
+		TRUE,                       // TRUE if windowed
+		D3DMULTISAMPLE_4_SAMPLES,
+		&msQuality
+	);
+
+	// Create multi-sampled render target
+	// Note: The dimensions and format match your back buffer, but you enable MSAA here.
+	hr = D3DDevice->CreateRenderTarget(
+		ResolutionWidth,
+		ResolutionHeight,
+		D3DFMT_X8R8G8B8,
+		D3DMULTISAMPLE_4_SAMPLES,
+		0,
+		FALSE,
+		&g_pRT_MSAA,
+		nullptr);
+
+	if (FAILED(hr))
+	{
+		return false;
+	}
+
+	hr = D3DDevice->CreateDepthStencilSurface(
+		ResolutionWidth,
+		ResolutionHeight,
+		D3DFMT_D24S8,   // 24-bit depth + 8-bit stencil is common
+		D3DMULTISAMPLE_4_SAMPLES,
+		0,
+		TRUE,           // Discard? If TRUE, the driver can discard depth data
+		&g_pDS_MSAA,
+		nullptr
+	);
+	if (FAILED(hr))
+	{
+		// If depth creation fails, release the color RT & fail out
+		g_pRT_MSAA->Release();
+		g_pRT_MSAA = nullptr;
+		return false;
+	}
+
+	// Create the single-sample render target (resolved target)
+	if (FAILED(D3DDevice->CreateRenderTarget(
+		ResolutionWidth,
+		ResolutionHeight,
+		D3DFMT_X8R8G8B8,
+		D3DMULTISAMPLE_NONE,
+		0,
+		FALSE,
+		&g_pRT_Resolved,
+		nullptr)))
+	{
+		return false;
+	}
+
+	return true;
 }
 
 void DX8Wrapper::Release_Device(void)
@@ -682,7 +727,7 @@ bool DX8Wrapper::Set_Any_Render_Device(void)
 	}
 
 	// Then fullscreen
-	for (dev_number = 0; dev_number < _RenderDeviceNameTable.Count(); dev_number++) {
+	for (int dev_number = 0; dev_number < _RenderDeviceNameTable.Count(); dev_number++) {
 		if (Set_Render_Device(dev_number,-1,-1,-1,0,false)) {
 			return true;
 		}
@@ -772,7 +817,7 @@ bool DX8Wrapper::Set_Render_Device(int dev, int width, int height, int bits, int
 	} else if (dev != -1) {
 		CurRenderDevice = dev;
 	}
-	
+
 	/*
 	** If user doesn't want to change res, set the res variables to match the 
 	** current resolution
@@ -816,17 +861,48 @@ bool DX8Wrapper::Set_Render_Device(int dev, int width, int height, int bits, int
 			DWORD dwstyle = ::GetWindowLong (_Hwnd, GWL_STYLE);
 			AdjustWindowRect (&rect, dwstyle, FALSE);
 
+			int x = (GetSystemMetrics(SM_CXSCREEN) / 2) - (ResolutionWidth / 2);
+			int y = (GetSystemMetrics(SM_CYSCREEN) / 2) - (ResolutionHeight / 2);
+
 			// Resize the window to fit this resolution
 			if (!windowed)
-				::SetWindowPos(_Hwnd, HWND_TOPMOST, 0, 0, rect.right-rect.left, rect.bottom-rect.top,SWP_NOSIZE |SWP_NOMOVE);
+			{
+				// Assume hwnd is your application’s window handle
+				LONG_PTR style = GetWindowLongPtr(_Hwnd, GWL_STYLE);
+
+				// Remove all overlapped-window styles and add WS_POPUP
+				style &= ~(WS_OVERLAPPEDWINDOW);
+				style |= WS_POPUP;
+
+				// Apply the new style
+				SetWindowLongPtr(_Hwnd, GWL_STYLE, style);
+
+				// Move window to (0,0) with the monitor’s resolution:
+				SetWindowPos(
+					_Hwnd,
+					HWND_TOP,
+					0,
+					0,
+					width,
+					height,
+					SWP_FRAMECHANGED | SWP_NOOWNERZORDER
+				);
+
+			}
 			else
-				::SetWindowPos (_Hwnd,
-								 NULL,
-								 0,
-								 0,
-								 rect.right-rect.left,
-								 rect.bottom-rect.top,
-								 SWP_NOZORDER | SWP_NOMOVE);
+			{
+				LONG_PTR style = GetWindowLongPtr(_Hwnd, GWL_STYLE);
+				style |= WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+				SetWindowLongPtr(_Hwnd, GWL_STYLE, style);
+
+				::SetWindowPos(_Hwnd,
+					NULL,
+					x,
+					y,
+					rect.right - rect.left,
+					rect.bottom - rect.top,
+					0);
+			}
 		}
 	}
 #endif
@@ -845,7 +921,7 @@ bool DX8Wrapper::Set_Render_Device(int dev, int width, int height, int bits, int
 	_PresentParameters.MultiSampleType = D3DMULTISAMPLE_NONE;
 	_PresentParameters.SwapEffect = IsWindowed ? D3DSWAPEFFECT_DISCARD : D3DSWAPEFFECT_FLIP;		// Shouldn't this be D3DSWAPEFFECT_FLIP?
 	_PresentParameters.hDeviceWindow = _Hwnd;
-	_PresentParameters.Windowed = IsWindowed;
+	_PresentParameters.Windowed = TRUE; // always windowed
 
 	_PresentParameters.EnableAutoDepthStencil = TRUE;				// Driver will attempt to match Z-buffer depth
 	_PresentParameters.Flags=0;											// We're not going to lock the backbuffer
@@ -936,10 +1012,11 @@ bool DX8Wrapper::Set_Render_Device(int dev, int width, int height, int bits, int
 	
 	bool ret;
 
-	if (reset_device)
-		ret = Reset_Device(restore_assets);	//reset device without restoring data - we're likely switching out of the app.
-	else
-		ret = Create_Device();
+	//if (reset_device)
+	//	ret = Reset_Device(restore_assets);	//reset device without restoring data - we're likely switching out of the app.
+	//else
+	//	ret = Create_Device();
+	ret = Create_Device();
 
 	WWDEBUG_SAY(("Reset/Create_Device done, reset_device=%d, restore_assets=%d\n", reset_device, restore_assets));
 
@@ -1008,8 +1085,8 @@ void DX8Wrapper::Set_Swap_Interval(int swap)
 		case 3: _PresentParameters.PresentationInterval = D3DPRESENT_INTERVAL_THREE; break;
 		default: _PresentParameters.PresentationInterval = D3DPRESENT_INTERVAL_ONE ; break;
 	}
-	
-	Reset_Device();
+	// TODO: dx12
+	//Reset_Device();
 }
 
 int DX8Wrapper::Get_Swap_Interval(void)
@@ -1065,6 +1142,10 @@ const char * DX8Wrapper::Get_Render_Device_Name(int device_index)
 
 bool DX8Wrapper::Set_Device_Resolution(int width,int height,int bits,int windowed, bool resize_window)
 {
+	if (!windowed) {
+		return true;
+	}
+
 	if (D3DDevice != NULL) {
 
 		if (width != -1) {
@@ -1096,21 +1177,36 @@ bool DX8Wrapper::Set_Device_Resolution(int width,int height,int bits,int windowe
 				AdjustWindowRect (&rect, dwstyle, FALSE);
 
 				// Resize the window to fit this resolution
+				int x = (GetSystemMetrics(SM_CXSCREEN) / 2) - (ResolutionWidth / 2);
+				int y = (GetSystemMetrics(SM_CYSCREEN) / 2) - (ResolutionHeight / 2);
+
+				// Resize the window to fit this resolution
 				if (!windowed)
-					::SetWindowPos(_Hwnd, HWND_TOPMOST, 0, 0, rect.right-rect.left, rect.bottom-rect.top,SWP_NOSIZE |SWP_NOMOVE);
+				{
+					::SetWindowPos(_Hwnd, HWND_TOPMOST, 0, 0, rect.right - rect.left, rect.bottom - rect.top, SWP_NOSIZE | SWP_NOMOVE);
+				}
 				else
-					::SetWindowPos (_Hwnd,
-									 NULL,
-									 0,
-									 0,
-									 rect.right-rect.left,
-									 rect.bottom-rect.top,
-									 SWP_NOZORDER | SWP_NOMOVE);
+				{
+					LONG_PTR style = GetWindowLongPtr(_Hwnd, GWL_STYLE);
+					style |= WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+					SetWindowLongPtr(_Hwnd, GWL_STYLE, style);
+
+					::SetWindowPos(_Hwnd,
+						NULL,
+						x,
+						y,
+						rect.right - rect.left,
+						rect.bottom - rect.top,
+						0);
+				}
 			}
 		}
 
-#pragma message("TODO: support changing windowed status and changing the bit depth")
-		return Reset_Device();
+
+		if (!RecreateGBuffer())
+			return false;
+
+		return true;
 	} else {
 		return false;
 	}
@@ -1270,7 +1366,8 @@ bool DX8Wrapper::Find_Color_And_Z_Mode(int resx,int resy,int bitdepth,D3DFORMAT 
 	bool found = false;
 	unsigned int mode = 0;
 
-	for (int format_index=0; format_index < format_count; format_index++) {
+	int format_index = 0;
+	for (format_index=0; format_index < format_count; format_index++) {
 		found |= Find_Color_Mode(format_table[format_index],resx,resy,&mode);
 		if (found) break;
 	}
@@ -1443,6 +1540,17 @@ void DX8Wrapper::Begin_Scene(void)
 	DX8_THREAD_ASSERT();
 	DX8CALL(BeginScene());
 
+	D3DDevice->SetRenderTarget(0, g_pRT_MSAA);
+	D3DDevice->SetDepthStencilSurface(g_pDS_MSAA);
+	D3DDevice->Clear(
+		0,
+		nullptr,
+		D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER,
+		D3DCOLOR_XRGB(0, 0, 0),
+		1.0f,
+		0
+	);
+
 	DX8WebBrowser::Update();
 }
 
@@ -1450,6 +1558,27 @@ void DX8Wrapper::End_Scene(bool flip_frames)
 {
 	DX8_THREAD_ASSERT();
 	DX8CALL(EndScene());
+
+	D3DDevice->StretchRect(
+		g_pRT_MSAA,     // Source
+		nullptr,
+		g_pRT_Resolved, // Destination
+		nullptr,
+		D3DTEXF_NONE    // Filter = NONE ensures a proper MSAA resolve
+	);
+
+	LPDIRECT3DSURFACE9 pBackBuffer = nullptr;
+	if (SUCCEEDED(D3DDevice->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &pBackBuffer)))
+	{
+		D3DDevice->StretchRect(
+			g_pRT_Resolved,
+			nullptr,
+			pBackBuffer,
+			nullptr,
+			D3DTEXF_NONE
+		);
+		pBackBuffer->Release();
+	}
 
 	DX8WebBrowser::Render(0);
 
@@ -1468,15 +1597,7 @@ void DX8Wrapper::End_Scene(bool flip_frames)
 		}
 
 		// If the device was lost we need to check for cooperative level and possibly reset the device
-		if (hr==D3DERR_DEVICELOST) {
-			hr=DX8Wrapper::D3DDevice->TestCooperativeLevel();
-			if (hr==D3DERR_DEVICENOTRESET) {
-				Reset_Device();
-			}
-		}
-		else {
-			DX8_ErrorCode(hr);
-		}
+		DX8_ErrorCode(hr);
 	}
 
 	// Each frame, release all of the buffers and textures.
@@ -1513,7 +1634,7 @@ void DX8Wrapper::Flip_To_Primary(void)
 
 				if (D3DERR_DEVICENOTRESET == hr) {
 					WWDEBUG_SAY(("DEVICENOTRESET: Resetting device.\n"));
-					Reset_Device();
+					//Reset_Device();
 					resetAttempts++;
 				}
 			} else {
@@ -2350,8 +2471,9 @@ void DX8Wrapper::Set_Light_Environment(LightEnvironmentClass* light_env)
 #endif
 		}
 
-		D3DLIGHT8 light;		
-		for (int l=0;l<light_count;++l) {
+		D3DLIGHT8 light;
+		int l = 0;
+		for (l=0;l<light_count;++l) {
 			::ZeroMemory(&light, sizeof(D3DLIGHT8));
 			light.Type=D3DLIGHT_DIRECTIONAL;
 			(Vector3&)light.Diffuse=light_env->Get_Light_Diffuse(l);
