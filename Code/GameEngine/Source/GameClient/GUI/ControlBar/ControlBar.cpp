@@ -1345,8 +1345,8 @@ void ControlBar::update( void )
 			multiSelect = ( drawToEvaluateFor == NULL );
 
 		}  
-		else // get the first and only drawble in the selection list
-			drawToEvaluateFor = TheInGameUI->getAllSelectedDrawables()->front();
+		else // get the first and only drawble in the selection list if and only if it exists
+			drawToEvaluateFor = (!TheInGameUI->getAllSelectedDrawables()->empty()) ? TheInGameUI->getAllSelectedDrawables()->front() : NULL;
 		Object *obj = drawToEvaluateFor ? drawToEvaluateFor->getObject() : NULL;
 		setPortraitByObject( obj );
 		
