@@ -4532,4 +4532,110 @@ void GameLogic::loadPostProcess( void )
 
 }  // end loadPostProcess
 
+WWCONSOLE_COMMAND(spawn, "Spawns a object at the cursor position for the local player")
+{
+	if (!TheGameLogic->isInGame() || TheShell->isShellActive())
+	{
+		DevConsole.AddLog("You are not in a game!");
+		return;
+	}
 
+	if (args.size() <= 0)
+	{
+		DevConsole.AddLog("Usage: spawn <objname> e.g. spawn ChinaVehicleDozer");
+		return;
+	}
+
+	const MouseIO* mouseIO = TheMouse->getMouseStatus();
+	Coord3D pos;
+
+	TheTacticalView->screenToTerrain(&mouseIO->pos, &pos);	
+
+	AsciiString objName = args[0].c_str();
+	if (objName.isNotEmpty())
+	{
+		Coord3D objPos = pos;
+		FindPositionOptions options;
+		options.minRadius = 5;
+		options.maxRadius = 10;
+		ThePartitionManager->update();
+		Bool foundPos = ThePartitionManager->findPositionAround(&pos, &options, &objPos);
+		if (foundPos)
+		{
+			Player* pPlayer = ThePlayerList->getLocalPlayer();
+			Object *unit = placeObjectAtPosition(0, objName, objPos, pPlayer, NULL);
+			if (unit) {
+				pPlayer->onUnitCreated(NULL, unit);
+			}
+		}
+		else
+		{
+			DEBUG_LOG(("Could not find position\n"));
+		}
+	}
+}
+
+WWCONSOLE_COMMAND(disconnect, "Disconnects from a game and returns you to the main menu")
+{
+	if (!TheGameLogic->isInGame() || TheShell->isShellActive())
+	{
+		DevConsole.AddLog("You are not in a game!");
+		return;
+	}
+
+	// destroy the quit menu
+	destroyQuitMenu();
+
+	// clear out all the game data
+	if (TheGameLogic->isInMultiplayerGame() && !TheGameLogic->isInSkirmishGame() && !TheGameInfo->isSandbox())
+	{
+		GameMessage* msg = TheMessageStream->appendMessage(GameMessage::MSG_SELF_DESTRUCT);
+		msg->appendBooleanArgument(TRUE);
+	}
+	/*GameMessage *msg =*/ TheMessageStream->appendMessage(GameMessage::MSG_CLEAR_GAME_DATA);
+	if (!TheGameLogic->isInMultiplayerGame())
+		TheGameLogic->setGamePaused(FALSE);
+	// TheGameLogic->clearGameData();
+	// display the menu on top of the shell stack
+  // TheShell->showShell();
+
+	// this will trigger an exit
+  // TheGameEngine->setQuitting( TRUE );
+	TheInGameUI->setClientQuiet(TRUE);
+}
+
+WWCONSOLE_COMMAND(map, "Opens a map")
+{
+	extern Bool IsConsoleActive;
+	if (args.size() <= 0)
+	{
+		DevConsole.AddLog("Usage: open <mapname> e.g. open Maps/USA01/USA01.map");
+		return;
+	}
+
+	if (!TheFileSystem->doesFileExist(args[0].c_str())) 
+	{
+		DevConsole.AddLog("Map file not found %s!", args[0].c_str());
+		return;
+	}
+
+	TheWritableGlobalData->m_mapName = AsciiString(args[0].c_str());
+	
+	IsConsoleActive = false;
+
+	if (TheGameLogic->isInGame())
+		TheGameLogic->clearGameData(FALSE);
+
+	if (TheShell->isShellActive() == FALSE)
+	{
+		destroyQuitMenu();
+	}
+	else
+	{
+		TheTransitionHandler->remove("MainMenuLoadReplayMenu");
+		TheTransitionHandler->remove("MainMenuLoadReplayMenuBack");		
+	}
+
+	TheGameLogic->prepareNewGame(GAME_SINGLE_PLAYER, DIFFICULTY_NORMAL, 0);
+	TheGameLogic->startNewGame(false);
+}
