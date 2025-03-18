@@ -8,6 +8,13 @@ set(CMAKE_CONFIGURATION_TYPES "Debug;Internal;Release" CACHE STRING "Configs" FO
 # SETUP
 ################################################################################
 
+
+set(GNG_GLOBAL_PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+
 ##### AUTOMATED #####
 
 set(GNG_COMPILE_OPTIONS "")
@@ -41,7 +48,6 @@ if(MSVC)
         /NOLOGO # Hide linker copyright notice
     )
     set(GNG_COMPILE_DEFINITIONS
-        __PLACEMENT_VEC_NEW_INLINE # Hack for placement new overides (will be removed)
         _WINDOWS
         WINVER=0x0A00              # Windows 10 is the minimum as we use DX12
         _WIN32_WINNT=0x0A00        # Windows 10 is the minimum as we use DX12
@@ -109,6 +115,8 @@ add_subdirectory(GameEngine)
 add_subdirectory(GameEngineDevice)
 add_subdirectory(GameRenderer)
 add_subdirectory(Tools/WorldBuilder)
+add_subdirectory(Tools/DebugWindow)
+add_subdirectory(Tools/ParticleEditor)
 add_subdirectory(Libraries/Source/Compression)
 add_subdirectory(Libraries/Source/WWVegas/ww3d2)
 add_subdirectory(Libraries/Source/WWVegas/WWDebug)
@@ -128,13 +136,16 @@ set(ALSOFT_INSTALL_AMBDEC_PRESETS OFF)
 set(ALSOFT_INSTALL_EXAMPLES OFF)
 set(ALSOFT_INSTALL_UTILS OFF)
 
+# Save off the current build type
+set(_OLD_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+
+# Force subdirectory to Release
+set(CMAKE_BUILD_TYPE "Release")
+
 add_subdirectory(Libraries/OpenAL)
 
-set_target_properties(OpenAL PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../Run"
-
-    OUTPUT_NAME_DEBUG "OpenAL32_debug"
-)
+# Restore previous build type
+set(CMAKE_BUILD_TYPE "${_OLD_BUILD_TYPE}")
 
 add_subdirectory(Libraries/Source/GameSpy)
  
@@ -152,6 +163,10 @@ add_executable(RTS WIN32
     # Main/WinMain.h
     # etc.
 )
+
+set_target_properties(RTS PROPERTIES
+    ${GNG_GLOBAL_PROPERTIES}
+ )
 
 set_target_properties(RTS PROPERTIES
     # Put all .exe files in a folder called "Run"
@@ -217,7 +232,8 @@ target_link_libraries(RTS PRIVATE
     wsock32
     imm32
     wininet
-
+    DebugWindow
+    ParticleEditor
     GameEngine
 )
 

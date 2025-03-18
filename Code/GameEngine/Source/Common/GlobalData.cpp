@@ -596,7 +596,7 @@ GlobalData::GlobalData()
 	m_dumpAssetUsage = FALSE;
 	m_framesPerSecondLimit = 0;
 	m_chipSetType = 0;
-	m_windowed = FALSE;
+	m_windowed = TRUE;
 	m_xResolution = 1280;
 	m_yResolution = 720;
 	m_maxShellScreens = 0;
@@ -621,8 +621,6 @@ GlobalData::GlobalData()
 	m_useShadowDecals = FALSE;
 	m_textureReductionFactor = -1;
 	m_enableBehindBuildingMarkers = TRUE;
-	m_scriptDebug = FALSE;
-	m_particleEdit = FALSE;
 	m_displayDebug = FALSE;
 	m_winCursors = TRUE;
 	m_constantDebugUpdate = FALSE;
@@ -804,8 +802,6 @@ GlobalData::GlobalData()
 	m_showClientPhysics = TRUE;
 	m_showTerrainNormals = FALSE;
 	m_showObjectHealth = FALSE;
-
-	m_particleEdit = FALSE;
 
 	m_cameraPitch = 0.0f;
 	m_cameraYaw = 0.0f;

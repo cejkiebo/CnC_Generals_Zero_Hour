@@ -92,6 +92,11 @@
 
 #define DRAWABLE_HASH_SIZE	8192
 
+void DrawStatUnitOverlay();
+void RestoreMouseClip();
+
+wwCVar com_showfps("com_showfps", "0", "Toggles FPS overlay", CVAR_BOOL);
+
 /// The GameClient singleton instance
 GameClient *TheGameClient = NULL;
 
@@ -698,7 +703,7 @@ void GameClient::update( void )
 #endif
 
 	// update all particle systems
-	if( !freezeTime )
+	if( !freezeTime)
 	{
 		// update particle systems
 		TheParticleSystemManager->setLocalPlayerIndex(localPlayerIndex);
@@ -717,9 +722,19 @@ void GameClient::update( void )
 	}
 
 	{
+		if (com_showfps.GetBool())
+		{
+			DrawStatUnitOverlay();
+		}
+
 		if (DevConsole.IsConsoleActive)
 		{
+			ClipCursor(NULL);
 			DevConsole.Draw(0.5f);
+		}
+		else if(AllowMouseClip())
+		{
+			RestoreMouseClip();
 		}
 	}
 
@@ -737,16 +752,6 @@ void GameClient::update( void )
 	{
 		// let display string factory handle its update
 		TheDisplayStringManager->update();
-	}
-
-	{
-		// update the shell
-		TheShell->UPDATE();
-	}
-
-	{
-		// update the in game UI 
-		TheInGameUI->UPDATE();
 	}
 }  // end update
 
@@ -1116,7 +1121,7 @@ void GameClient::preloadAssets( TimeOfDay timeOfDay )
 	DEBUG_LOG(("Preloading memory dwAvailVirtual  %d --> %d : %d\n",
 		before.dwAvailVirtual, after.dwAvailVirtual, before.dwAvailVirtual - after.dwAvailVirtual));
 
-	char *textureNames[] = {
+	const char *textureNames[] = {
 		"ptspruce01.tga",
 		"exrktflame.tga",
 		"cvlimo3_d2.tga",

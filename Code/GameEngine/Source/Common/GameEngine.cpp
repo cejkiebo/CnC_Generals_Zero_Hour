@@ -1,4 +1,4 @@
-/*
+﻿/*
 **	Command & Conquer Generals(tm)
 **	Copyright 2025 Electronic Arts Inc.
 **
@@ -106,15 +106,18 @@
 #include "GameNetwork/GameSpy/PeerDefs.h"
 #include "GameNetwork/GameSpy/PersistentStorageThread.h"
 #include "Common/Player.h"
-
+#include "WW3D2/ww3d.h"
 
 #include "Common/Version.h"
+#include <chrono>
 
 #ifdef _INTERNAL
 // for occasional debugging...
 //#pragma optimize("", off)
 //#pragma MESSAGE("************************************** WARNING, optimization disabled for debugging purposes")
 #endif
+
+wwCVar com_clientMaxMs("com_clientMaxMs", "16", "Max default client FPS", CVAR_INT);
 
 //-------------------------------------------------------------------------------------------------
 
@@ -175,6 +178,12 @@ extern CComModule _Module;
 
 //-------------------------------------------------------------------------------------------------
 static void updateTGAtoDDS();
+
+void StartServerCpuFrameTimer();
+void EndServerCpuFrameTimer();
+
+void StartClientCpuFrameTimer();
+void EndClientCpuFrameTimer();
 
 Int GameEngine::getFramesPerSecondLimit( void )
 {
@@ -568,158 +577,124 @@ DECLARE_PERF_TIMER(GameEngine_update)
  */
 void GameEngine::update( void )
 { 
+	static int m_serverFrame = 0;
+	static int m_clientFrame = 0;
+
+//	m_maxFPS = 60;
+	extern INT TheW3DFrameLengthInMsec;
+	DWORD limit = (1000.0f / m_maxFPS) - 1;
+	DWORD clientlimit = com_clientMaxMs.GetInt();
+
+	if (limit < clientlimit)
+		clientlimit = limit;
+
+	// Lock to slower framerate for cinematics. 
+	//bool inCinematic = limit > 33;
+	TheW3DFrameLengthInMsec = clientlimit;
+
 	USE_PERF_TIMER(GameEngine_update)
 	{
+		static auto lastTimeServer = std::chrono::high_resolution_clock::now();
+		static auto lastTimeClient = std::chrono::high_resolution_clock::now();
+
+		// Grab the current time		
+		auto now = std::chrono::high_resolution_clock::now();
+
+		// Compute how many milliseconds have elapsed since last call
+		auto elapsedMsServer = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTimeServer).count();
+		auto elapsedMsClient = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTimeClient).count();
+		
 
 		{
-			
-			// VERIFY CRC needs to be in this code block.  Please to not pull TheGameLogic->update() inside this block.
-			VERIFY_CRC
-
-			TheRadar->UPDATE();
-
-			/// @todo Move audio init, update, etc, into GameClient update
-			
-			TheAudio->UPDATE();
-			TheGameClient->UPDATE();
-			TheMessageStream->propagateMessages();
-
-			if (TheNetwork != NULL)
 			{
-				TheNetwork->UPDATE();
+				VERIFY_CRC
+
+				TheRadar->UPDATE();
+				TheAudio->UPDATE();
+
+				if (elapsedMsClient >= clientlimit)
+				{
+					StartClientCpuFrameTimer();					
+
+					// Get the elapsed duration in milliseconds as a float:
+					float elapsedMs = std::chrono::duration<float, std::milli>(now - lastTimeClient).count();
+
+					// Convert ms → seconds:
+					float clientDeltaTime = elapsedMs / 1000.0f; 
+
+					WW3D::Set_DeltaTime(clientDeltaTime * 30);
+					lastTimeClient = now;
+					TheGameClient->setFrame(m_clientFrame);
+					m_clientFrame++;
+					TheW3DFrameLengthInMsec = clientlimit;
+					TheGameClient->UPDATE();
+
+					TheMessageStream->propagateMessages();
+
+					// update the shell
+					TheShell->UPDATE();
+
+					// update the in game UI 
+					TheInGameUI->UPDATE();
+
+					EndClientCpuFrameTimer();
+				}
+				
+				if (elapsedMsServer >= limit)
+				{
+					if (TheNetwork != NULL)
+					{
+						TheNetwork->UPDATE();
+					}
+				}
+				
+				TheCDManager->UPDATE();
 			}
-			 
-			TheCDManager->UPDATE();
+
+			// If network is absent or we have fresh network data, update the game logic
+			if ((TheNetwork == NULL && !TheGameLogic->isGamePaused())
+				|| (TheNetwork && TheNetwork->isFrameDataReady()))
+			{
+				if (elapsedMsServer >= limit)
+				{
+					StartServerCpuFrameTimer();
+					TheGameLogic->UPDATE();
+					EndServerCpuFrameTimer();
+				}
+			}
+
+			if (elapsedMsServer >= limit)
+			{
+				lastTimeServer = now;
+				m_serverFrame++;
+				TheGameLogic->setFrame(m_serverFrame);
+			}
+
+			
 		}
-
-
-		if ((TheNetwork == NULL && !TheGameLogic->isGamePaused()) || (TheNetwork && TheNetwork->isFrameDataReady()))
-		{
-			TheGameLogic->UPDATE();
-		}
-
-	}	// end perfGather
-
+	} // end perfGather
 }
 
 // Horrible reference, but we really, really need to know if we are windowed.
 extern bool DX8Wrapper_IsWindowed;
 extern HWND ApplicationHWnd;
 
+bool AllowMouseClip() {
+	return !DX8Wrapper_IsWindowed && !DevConsole.IsConsoleActive;
+}
+
 /** -----------------------------------------------------------------------------------------------
  * The "main loop" of the game engine. It will not return until the game exits. 
  */
 void GameEngine::execute( void )
 {
-	
-	DWORD prevTime = timeGetTime();
-#if defined(_DEBUG) || defined(_INTERNAL)
-	DWORD startTime = timeGetTime() / 1000;
-#endif
-
 	// pretty basic for now
-	while( !m_quitting )
+	while (!m_quitting)
 	{
+		update();
 
-		//if (TheGlobalData->m_vTune)
-		{
-#ifdef PERF_TIMERS
-			PerfGather::resetAll();
-#endif
-		}
-
-		{
-
-#if defined(_DEBUG) || defined(_INTERNAL)
-			{
-				// enter only if in benchmark mode
-				if (TheGlobalData->m_benchmarkTimer > 0)
-				{
-					DWORD currentTime = timeGetTime() / 1000;
-					if (TheGlobalData->m_benchmarkTimer < currentTime - startTime)
-					{
-						if (TheGameLogic->isInGame())
-						{
-							if (TheRecorder->getMode() == RECORDERMODETYPE_RECORD)
-							{
-								TheRecorder->stopRecording();
-							}
-							TheGameLogic->clearGameData();
-						}
-						TheGameEngine->setQuitting(TRUE);
-					}
-				}
-			}
-#endif
-			
-			{
-				//try 
-				//{
-					// compute a frame
-					update();
-				//}
-				//catch (INIException e)
-				//{
-				//	// Release CRASH doesn't return, so don't worry about executing additional code.
-				//	if (e.mFailureMessage)
-				//		RELEASE_CRASH((e.mFailureMessage));
-				//	else
-				//		RELEASE_CRASH(("Uncaught Exception in GameEngine::update"));
-				//}
-				//catch (...)
-				//{
-				//	// try to save info off
-				//	try 
-				//	{
-				//		if (TheRecorder && TheRecorder->getMode() == RECORDERMODETYPE_RECORD && TheRecorder->isMultiplayer())
-				//			TheRecorder->cleanUpReplayFile();
-				//	}
-				//	catch (...)
-				//	{
-				//	}
-				//	RELEASE_CRASH(("Uncaught Exception in GameEngine::update"));
-				//}	// catch
-			}	// perf
-
-			{
-
-				if (TheTacticalView->getTimeMultiplier()<=1 && !TheScriptEngine->isTimeFast()) 
-				{
-
-		// I'm disabling this in internal because many people need alt-tab capability.  If you happen to be
-		// doing performance tuning, please just change this on your local system. -MDC
-		#if defined(_DEBUG) || defined(_INTERNAL)
-					::Sleep(1); // give everyone else a tiny time slice.
-		#endif
-
-					// limit the framerate
-					DWORD now = timeGetTime();
-					DWORD limit = (1000.0f/m_maxFPS)-1;
-					while (TheGlobalData->m_useFpsLimit && (now - prevTime) < limit) 
-					{
-						::Sleep(0);
-						now = timeGetTime();
-					}
-					//Int slept = now - prevTime;
-					//DEBUG_LOG(("delayed %d\n",slept));
-
-					prevTime = now;
-				}
-			}
-
-		}	// perfgather for execute_loop
-
-#ifdef PERF_TIMERS
-		if (!m_quitting && TheGameLogic->isInGame() && !TheGameLogic->isInShellGame() && !TheGameLogic->isGamePaused())
-		{
-			PerfGather::dumpAll(TheGameLogic->getFrame());
-			PerfGather::displayGraph(TheGameLogic->getFrame());
-			PerfGather::resetAll();
-		}
-#endif
-
+		Sleep(0);
 	}
-
 }
 
 /** -----------------------------------------------------------------------------------------------
