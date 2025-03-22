@@ -71,6 +71,8 @@
 #include "dx8webbrowser.h"
 #include "DxErr.h"
 
+#include <pix3.h>
+#include <d3dx12.h>
 
 #define WW3D_DEVTYPE D3DDEVTYPE_HAL
 
@@ -101,17 +103,20 @@ int								DX8Wrapper::BitDepth										= DEFAULT_BIT_DEPTH;
 int								DX8Wrapper::TextureBitDepth							= DEFAULT_TEXTURE_BIT_DEPTH;
 bool								DX8Wrapper::IsWindowed									= false;
 D3DFORMAT					DX8Wrapper::DisplayFormat	= D3DFMT_UNKNOWN;
+bool						DX8Wrapper::IsUploadingTextureData = false;
 
 D3DMATRIX						DX8Wrapper::old_world;
 D3DMATRIX						DX8Wrapper::old_view;
 D3DMATRIX						DX8Wrapper::old_prj;
 
 tr_renderer* DX8Wrapper::D3D12Renderer;
+tr_cmd_pool* DX8Wrapper::m_cmd_pool;
+tr_cmd** DX8Wrapper::m_cmds;
 
 bool								DX8Wrapper::world_identity;
 unsigned							DX8Wrapper::RenderStates[256];
 unsigned							DX8Wrapper::TextureStageStates[MAX_TEXTURE_STAGES][32];
-IDirect3DBaseTexture8 *		DX8Wrapper::Textures[MAX_TEXTURE_STAGES];
+wwDeviceTexture*					DX8Wrapper::Textures[MAX_TEXTURE_STAGESACTUAL];
 RenderStateStruct				DX8Wrapper::render_state;
 unsigned							DX8Wrapper::render_state_changed;
 
@@ -124,9 +129,14 @@ IDirect3DSurface8 *			DX8Wrapper::CurrentRenderTarget						= NULL;
 IDirect3DSurface8 *			DX8Wrapper::DefaultRenderTarget						= NULL;
 IDirect3DDevice9On12*		DX8Wrapper::device9On12 = NULL;
 
-LPDIRECT3DSURFACE9			DX8Wrapper::g_pRT_MSAA = NULL;
-PDIRECT3DSURFACE9			DX8Wrapper::g_pDS_MSAA = NULL;
-LPDIRECT3DSURFACE9			DX8Wrapper::g_pRT_Resolved = NULL;
+ID3D12DescriptorHeap*		DX8Wrapper::m_ImGuiSrvDescHeap = NULL;
+ID3D12DescriptorHeap* DX8Wrapper::m_RtvSrvDescHeap = NULL;
+wwRenderTarget*				DX8Wrapper::sceneRenderTarget = NULL;
+IDirect3DSwapChain9*		DX8Wrapper::m_swapChain9 = NULL;
+D3DPRESENT_PARAMETERS		DX8Wrapper::m_d3dPresentParams;
+IDirect3DSurface9			*DX8Wrapper::m_backBuffers[3];
+ID3D12Resource*				DX8Wrapper::m_backBufferResources[3];
+D3D12_CPU_DESCRIPTOR_HANDLE	DX8Wrapper::m_backBufferRTV[3];
 
 int DX8Wrapper::numDeviceVertexShaders = 0;
 DeviceVertexShader DX8Wrapper::deviceVertexShaders[256];
@@ -212,6 +222,53 @@ extern "C" {
 	}
 };
 
+// Simple free list based allocator
+struct WWDescriptorHeapAllocator
+{
+	ID3D12DescriptorHeap* Heap = nullptr;
+	D3D12_DESCRIPTOR_HEAP_TYPE  HeapType = D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES;
+	D3D12_CPU_DESCRIPTOR_HANDLE HeapStartCpu;
+	D3D12_GPU_DESCRIPTOR_HANDLE HeapStartGpu;
+	UINT                        HeapHandleIncrement;
+	ImVector<int>               FreeIndices;
+
+	void Create(ID3D12Device* device, ID3D12DescriptorHeap* heap)
+	{
+		IM_ASSERT(Heap == nullptr && FreeIndices.empty());
+		Heap = heap;
+		D3D12_DESCRIPTOR_HEAP_DESC desc = heap->GetDesc();
+		HeapType = desc.Type;
+		HeapStartCpu = Heap->GetCPUDescriptorHandleForHeapStart();
+		HeapStartGpu = Heap->GetGPUDescriptorHandleForHeapStart();
+		HeapHandleIncrement = device->GetDescriptorHandleIncrementSize(HeapType);
+		FreeIndices.reserve((int)desc.NumDescriptors);
+		for (int n = desc.NumDescriptors; n > 0; n--)
+			FreeIndices.push_back(n - 1);
+	}
+	void Destroy()
+	{
+		Heap = nullptr;
+		FreeIndices.clear();
+	}
+	void Alloc(D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu_desc_handle, D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_desc_handle)
+	{
+		IM_ASSERT(FreeIndices.Size > 0);
+		int idx = FreeIndices.back();
+		FreeIndices.pop_back();
+		out_cpu_desc_handle->ptr = HeapStartCpu.ptr + (idx * HeapHandleIncrement);
+		out_gpu_desc_handle->ptr = HeapStartGpu.ptr + (idx * HeapHandleIncrement);
+	}
+	void Free(D3D12_CPU_DESCRIPTOR_HANDLE out_cpu_desc_handle, D3D12_GPU_DESCRIPTOR_HANDLE out_gpu_desc_handle)
+	{
+		int cpu_idx = (int)((out_cpu_desc_handle.ptr - HeapStartCpu.ptr) / HeapHandleIncrement);
+		int gpu_idx = (int)((out_gpu_desc_handle.ptr - HeapStartGpu.ptr) / HeapHandleIncrement);
+		IM_ASSERT(cpu_idx == gpu_idx);
+		FreeIndices.push_back(cpu_idx);
+	}
+};
+
+WWDescriptorHeapAllocator g_pd3dSrvDescHeapAlloc;
+
 /***********************************************************************************
 **
 ** DX8Wrapper Implementation
@@ -284,6 +341,9 @@ bool DX8Wrapper::Init(void * hwnd)
 	d3d9On12Args.NumQueues = 1;
 	d3d9On12Args.NodeMask = 0; // Single-GPU scenario
 	//D3DInterface = Direct3DCreate9On12(D3D_SDK_VERSION, &d3d9On12Args, 1);
+
+	tr_create_cmd_pool(D3D12Renderer, D3D12Renderer->graphics_queue, false, &m_cmd_pool);
+	tr_create_cmd_n(m_cmd_pool, false, 3, &m_cmds);
 	
 	Direct3DCreate9On12Ex(D3D_SDK_VERSION, &d3d9On12Args, 1, &D3DInterface);
 // jmarshall end
@@ -448,11 +508,58 @@ void DX8Wrapper::Do_Onetime_Device_Dependent_Shutdowns(void)
 
 }
 
+// Define the function pointer type
+typedef void (*PFN_D3D9ON12_SET_GRAPHICS_RENDER_CALLBACK)(void* callbackFunction);
+
+// Declare the global function pointer
+PFN_D3D9ON12_SET_GRAPHICS_RENDER_CALLBACK D3D9on12SetGraphicsRenderCallback = nullptr;
+
+// Function to load the DLL and resolve the function pointer
+bool LoadD3D9on12AndGetCallback() {
+	HMODULE hD3D9on12 = LoadLibraryW(L"d3d9on12.dll");
+	if (!hD3D9on12) {
+		return false;
+	}
+
+	D3D9on12SetGraphicsRenderCallback =
+		reinterpret_cast<PFN_D3D9ON12_SET_GRAPHICS_RENDER_CALLBACK>(
+			GetProcAddress(hD3D9on12, "D3D9on12SetGraphicsRenderCallback"));
+
+	if (!D3D9on12SetGraphicsRenderCallback) {
+		FreeLibrary(hD3D9on12);
+		return false;
+	}
+
+	return true;
+}
+
+void DX8Wrapper::D3D9on12RenderWithGraphicsList(ID3D12GraphicsCommandList* commandList) {	
+	if (IsUploadingTextureData)
+		return;
+
+	if (!IsWorldBuilder())
+	{
+		ImDrawData* drawData = ImGui::GetDrawData();
+		ImGui::Render();
+		if (drawData)
+		{
+			PIXScopedEvent(commandList, 0ull, L"ImGUI");
+			commandList->SetDescriptorHeaps(1, &m_ImGuiSrvDescHeap);
+			ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), commandList);
+		}	
+	}
+}
 
 bool DX8Wrapper::Create_Device(void)
 {
 	WWASSERT(D3DDevice == NULL);	// for now, once you've created a device, you're stuck with it!
-#
+
+	if (!LoadD3D9on12AndGetCallback()) {
+		return false;
+	}
+
+	D3D9on12SetGraphicsRenderCallback(D3D9on12RenderWithGraphicsList);
+
 	D3DCAPS8 caps;
 	if (FAILED( D3DInterface->GetDeviceCaps(
 		CurRenderDevice,
@@ -514,7 +621,108 @@ bool DX8Wrapper::Create_Device(void)
 
 	// Setup Platform/Renderer backends
 	ImGui_ImplWin32_Init(_Hwnd);
-	ImGui_ImplDX9_Init(D3DDevice);
+	{
+		// Create the SRV heap:
+		{
+			IDirect3DSwapChain9* m_swapChain9 = nullptr;
+			HRESULT hr = D3DDevice->GetSwapChain(0, &m_swapChain9);
+			if (FAILED(hr) || !m_swapChain9)
+			{
+				return false;
+			}
+
+			hr = m_swapChain9->GetPresentParameters(&m_d3dPresentParams);
+			if (FAILED(hr))
+			{
+				return false;
+			}
+
+			for (UINT i = 0; i < m_d3dPresentParams.BackBufferCount; i++)
+			{
+				hr = m_swapChain9->GetBackBuffer(i, D3DBACKBUFFER_TYPE_MONO, &m_backBuffers[i]);
+				if (FAILED(hr) || !m_backBuffers[i])
+				{
+					return false;
+				}
+			}
+
+			{
+				D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+				desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+				desc.NumDescriptors = 64;
+				desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+				desc.NodeMask = 0;
+
+				hr = D3D12Renderer->dx_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_ImGuiSrvDescHeap));
+				if (FAILED(hr))
+				{
+					return false;
+				}
+
+				g_pd3dSrvDescHeapAlloc.Create(D3D12Renderer->dx_device, m_ImGuiSrvDescHeap);
+				// Pass m_ImGuiSrvDescHeap to ImGui_ImplDX12_Init(...),
+				// along with CPU/GPU start handles, etc.
+			}
+
+
+			{
+				D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
+				rtvHeapDesc.NumDescriptors = m_d3dPresentParams.BackBufferCount; // one per back buffer
+				rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+				rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE; // not shader visible
+				rtvHeapDesc.NodeMask = 0;
+
+				hr = D3D12Renderer->dx_device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&m_RtvSrvDescHeap));
+				if (FAILED(hr))
+				{
+					return false;
+				}
+
+				// We'll need a pointer to the start of the heap plus the increment size
+				D3D12_CPU_DESCRIPTOR_HANDLE rtvHandleStart = m_RtvSrvDescHeap->GetCPUDescriptorHandleForHeapStart();
+				UINT rtvDescriptorSize =
+					D3D12Renderer->dx_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
+				for (UINT i = 0; i < m_d3dPresentParams.BackBufferCount; i++)
+				{
+					ID3D12Resource* resource12 = nullptr;
+					hr = device9On12->UnwrapUnderlyingResource(
+						m_backBuffers[i], // The IDirect3DSurface9
+						D3D12Renderer->graphics_queue->dx_queue,              // Must match the queue 9On12 is using
+						__uuidof(ID3D12Resource),
+						reinterpret_cast<void**>(&resource12)
+					);
+					if (FAILED(hr) || !resource12)
+					{
+						return false;
+					}
+
+					m_backBufferResources[i] = resource12; // store for later transitions
+
+					D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHandleStart;
+					rtvHandle.ptr += i * rtvDescriptorSize; // offset for each back buffer
+
+					D3D12Renderer->dx_device->CreateRenderTargetView(resource12, nullptr, rtvHandle);
+					
+					m_backBufferRTV[i] = rtvHandle;
+				}
+			}
+		}
+
+		ImGui_ImplDX12_InitInfo init_info = {};
+		init_info.Device = D3D12Renderer->dx_device;
+		init_info.CommandQueue = D3D12Renderer->graphics_queue->dx_queue;
+		init_info.NumFramesInFlight = m_d3dPresentParams.BackBufferCount;
+		init_info.RTVFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+		init_info.DSVFormat = DXGI_FORMAT_UNKNOWN;
+		// Allocating SRV descriptors (for textures) is up to the application, so we provide callbacks.
+		// (current version of the backend will only allocate one descriptor, future versions will need to allocate more)
+		init_info.SrvDescriptorHeap = m_ImGuiSrvDescHeap;
+		init_info.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu_handle, D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_handle) { return g_pd3dSrvDescHeapAlloc.Alloc(out_cpu_handle, out_gpu_handle); };
+		init_info.SrvDescriptorFreeFn = [](ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle, D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle) { return g_pd3dSrvDescHeapAlloc.Free(cpu_handle, gpu_handle); };
+
+		ImGui_ImplDX12_Init(&init_info);
+	}
 	io.Fonts->AddFontDefault();	
 	g_BigConsoleFont = io.Fonts->AddFontFromFileTTF(
 		"Fonts\\Arial.ttf",
@@ -538,16 +746,11 @@ bool DX8Wrapper::RecreateGBuffer(void) {
 	ImGuiIO& io = ImGui::GetIO();
 	io.DisplaySize = ImVec2((float)ResolutionWidth, (float)ResolutionHeight);
 
-	if (g_pRT_MSAA)
+	if (sceneRenderTarget)
 	{
-		g_pRT_MSAA->Release();
-		g_pRT_MSAA = nullptr;
-
-		g_pDS_MSAA->Release();
-		g_pDS_MSAA = nullptr;
-
-		g_pRT_Resolved->Release();
-		g_pRT_Resolved = nullptr;
+		sceneRenderTarget->Release();
+		delete sceneRenderTarget;
+		sceneRenderTarget = NULL;
 	}
 
 	HRESULT hr = D3DInterface->CheckDeviceMultiSampleType(
@@ -559,54 +762,8 @@ bool DX8Wrapper::RecreateGBuffer(void) {
 		&msQuality
 	);
 
-	// Create multi-sampled render target
-	// Note: The dimensions and format match your back buffer, but you enable MSAA here.
-	hr = D3DDevice->CreateRenderTarget(
-		ResolutionWidth,
-		ResolutionHeight,
-		D3DFMT_X8R8G8B8,
-		D3DMULTISAMPLE_4_SAMPLES,
-		0,
-		FALSE,
-		&g_pRT_MSAA,
-		nullptr);
-
-	if (FAILED(hr))
-	{
-		return false;
-	}
-
-	hr = D3DDevice->CreateDepthStencilSurface(
-		ResolutionWidth,
-		ResolutionHeight,
-		D3DFMT_D24S8,   // 24-bit depth + 8-bit stencil is common
-		D3DMULTISAMPLE_4_SAMPLES,
-		0,
-		TRUE,           // Discard? If TRUE, the driver can discard depth data
-		&g_pDS_MSAA,
-		nullptr
-	);
-	if (FAILED(hr))
-	{
-		// If depth creation fails, release the color RT & fail out
-		g_pRT_MSAA->Release();
-		g_pRT_MSAA = nullptr;
-		return false;
-	}
-
-	// Create the single-sample render target (resolved target)
-	if (FAILED(D3DDevice->CreateRenderTarget(
-		ResolutionWidth,
-		ResolutionHeight,
-		D3DFMT_X8R8G8B8,
-		D3DMULTISAMPLE_NONE,
-		0,
-		FALSE,
-		&g_pRT_Resolved,
-		nullptr)))
-	{
-		return false;
-	}
+	sceneRenderTarget = new wwRenderTarget();
+	sceneRenderTarget->Initialize(ResolutionWidth, ResolutionHeight, D3DFMT_X8R8G8B8, D3DFMT_D24S8, D3DMULTISAMPLE_4_SAMPLES, 0);
 
 	return true;
 }
@@ -1587,8 +1744,7 @@ void DX8Wrapper::Begin_Scene(void)
 	StartGpuFrameTimer();
 	DX8CALL(BeginScene());	
 
-	D3DDevice->SetRenderTarget(0, g_pRT_MSAA);
-	D3DDevice->SetDepthStencilSurface(g_pDS_MSAA);
+	sceneRenderTarget->BeginRender();
 	D3DDevice->Clear(
 		0,
 		nullptr,
@@ -1598,12 +1754,6 @@ void DX8Wrapper::Begin_Scene(void)
 		0
 	);
 
-	if (!IsWorldBuilder())
-	{
-		ImGui_ImplDX9_NewFrame();
-		ImGui_ImplWin32_NewFrame();
-	}
-
 	DX8WebBrowser::Update();
 }
 
@@ -1611,36 +1761,9 @@ void DX8Wrapper::End_Scene(bool flip_frames)
 {
 	DX8_THREAD_ASSERT();
 
-	if (!IsWorldBuilder())
-	{
-		ImGui::Render();
-		ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
-	}	
+	D3DDevice->EndScene();	
 
-	D3DDevice->EndScene();
-
-	D3DDevice->StretchRect(
-		g_pRT_MSAA,     // Source
-		nullptr,
-		g_pRT_Resolved, // Destination
-		nullptr,
-		D3DTEXF_NONE    // Filter = NONE ensures a proper MSAA resolve
-	);
-
-	LPDIRECT3DSURFACE9 pBackBuffer = nullptr;
-	if (SUCCEEDED(D3DDevice->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &pBackBuffer)))
-	{
-		D3DDevice->StretchRect(
-			g_pRT_Resolved,
-			nullptr,
-			pBackBuffer,
-			nullptr,
-			D3DTEXF_NONE
-		);
-		pBackBuffer->Release();
-	}
-	
-
+	sceneRenderTarget->EndRender();	
 
 	DX8WebBrowser::Render(0);
 
@@ -2060,6 +2183,7 @@ void DX8Wrapper::Draw_Strip(
 
 void DX8Wrapper::Apply_Render_State_Changes()
 {
+#if 0
 	{
 		// 1. Retrieve the fixed-function pipeline matrices from the device
 		D3DXMATRIX matWorld, matView, matProj;
@@ -2079,7 +2203,7 @@ void DX8Wrapper::Apply_Render_State_Changes()
 
 		DX8Wrapper::SetVertexShaderConstantF(0, (float*)&matWVP_Transposed, 4);
 	}
-
+#endif
 	if (!render_state_changed) return;
 	if (render_state_changed&SHADER_CHANGED) {
 		SNAPSHOT_SAY(("DX8 - apply shader\n"));
@@ -2180,17 +2304,18 @@ void DX8Wrapper::Apply_Render_State_Changes()
 	render_state_changed&=((unsigned)WORLD_IDENTITY|(unsigned)VIEW_IDENTITY);
 }
 
-IDirect3DTexture8 * DX8Wrapper::_Create_DX8_Texture(
+wwDeviceTexture * DX8Wrapper::_Create_DX8_Texture(
 	unsigned int width, 
 	unsigned int height,
 	WW3DFormat format, 
 	TextureClass::MipCountType mip_level_count,
 	D3DPOOL pool,
-	bool rendertarget)
+	bool rendertarget,
+	bool iscompressed)
 {
 	DX8_THREAD_ASSERT();
 	DX8_Assert();
-	IDirect3DTexture8 *texture = NULL;
+	wwDeviceTexture *texture = NULL;
 
 	pool = D3DPOOL_DEFAULT; 
 
@@ -2203,15 +2328,16 @@ IDirect3DTexture8 * DX8Wrapper::_Create_DX8_Texture(
 	// Render target may return NOTAVAILABLE, in
 	// which case we return NULL.
 	if (rendertarget) {
-		unsigned ret=D3DXCreateTexture(
-			DX8Wrapper::DX8Wrapper::D3DDevice, 
-			width, 
+		HRESULT ret = DX8Wrapper::CreateTexture(
+			width,
 			height,
 			mip_level_count,
-			D3DUSAGE_RENDERTARGET, 
+			D3DUSAGE_RENDERTARGET,
 			WW3DFormat_To_D3DFormat(format),
-			pool, 
-			&texture);
+			pool,
+			&texture,
+			nullptr // pSharedHandle (must be NULL unless you're doing something special)
+		);
 
 		if (ret==D3DERR_NOTAVAILABLE) {
 			Non_Fatal_Log_DX8_ErrorCode(ret,__FILE__,__LINE__);
@@ -2231,12 +2357,17 @@ IDirect3DTexture8 * DX8Wrapper::_Create_DX8_Texture(
 
 	// Don't allow any errors in non-render target
 	// texture creation.
+	DWORD usage = D3DUSAGE_DYNAMIC;
+	if (iscompressed) {
+		usage = 0;
+		pool = D3DPOOL_SYSTEMMEM;
+	}
 
-	HRESULT hr = DX8Wrapper::DX8Wrapper::D3DDevice->CreateTexture(
+	HRESULT hr = DX8Wrapper::CreateTexture(
 		width,
 		height,
 		mip_level_count,     // Equivalent to the D3DX "MIPLevels" parameter
-		D3DUSAGE_DYNAMIC,  
+		usage,
 		WW3DFormat_To_D3DFormat(format),
 		pool,
 		&texture,
@@ -2253,13 +2384,101 @@ IDirect3DTexture8 * DX8Wrapper::_Create_DX8_Texture(
 	return texture;
 }
 
-IDirect3DTexture8 * DX8Wrapper::_Create_DX8_Texture(
+HRESULT DX8Wrapper::CreateTextureDDS(
+	const void* pDDSData,     // Pointer to the entire DDS file in memory
+	UINT                DDSDataSize,  // Size of that memory block (in bytes)
+	DWORD               Usage,        // e.g., 0 or D3DUSAGE_DYNAMIC, etc.
+	D3DPOOL             Pool,         // For 9Ex, typically D3DPOOL_DEFAULT
+	unsigned int& Width,
+	unsigned int& Height,
+	unsigned int& MipLevels,
+	wwDeviceTexture** ppTexture     // [out] Receives the wrapped texture
+)
+{
+	if (!pDDSData || DDSDataSize == 0 || !ppTexture)
+		return E_INVALIDARG;
+
+	IDirect3DTexture9* pTexture9 = nullptr;
+	D3DXIMAGE_INFO info = {};
+	HRESULT hr = D3DXCreateTextureFromFileInMemoryEx(
+		D3DDevice,          // IDirect3DDevice9*
+		pDDSData,           // in-memory DDS file data
+		DDSDataSize,        // size of that data
+		D3DX_DEFAULT,       // use DDS dimensions
+		D3DX_DEFAULT,
+		D3DX_DEFAULT,       // use DDS mip levels (or generate if needed)
+		Usage,              // usage flags
+		D3DFMT_UNKNOWN,     // let D3DX infer the format from DDS
+		Pool,               // likely D3DPOOL_DEFAULT for D3D9Ex
+		D3DX_DEFAULT,       // default filter
+		D3DX_DEFAULT,       // mip filter
+		0,                  // no colorkey
+		&info,            // optional D3DXIMAGE_INFO*
+		nullptr,            // optional PALETTEENTRY*
+		&pTexture9          // [out] the created texture
+	);
+
+	if (FAILED(hr))
+	{
+		// If we fail to load, bail out
+		return hr;
+	}
+
+	Width = info.Width;
+	Height = info.Height;
+	MipLevels = info.MipLevels;
+
+	ID3D12Resource* pResource12 = nullptr;
+	IsUploadingTextureData = true;
+	hr = DX8Wrapper::device9On12->UnwrapUnderlyingResource(
+		pTexture9,
+		D3D12Renderer->graphics_queue->dx_queue,
+		__uuidof(ID3D12Resource),
+		reinterpret_cast<void**>(&pResource12)
+	);
+	IsUploadingTextureData = false;
+	if (FAILED(hr))
+	{
+		// If unwrap fails, clean up
+		pTexture9->Release();
+		return hr;
+	}
+
+	*ppTexture = new wwDeviceTexture(pTexture9, pResource12);
+
+	// Success
+	return S_OK;
+}
+
+HRESULT DX8Wrapper::CreateTexture(UINT Width, UINT Height, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool, wwDeviceTexture** ppTexture, HANDLE* pSharedHandle) {
+	IDirect3DTexture9* textureHandle;
+
+	HRESULT hr = D3DDevice->CreateTexture(Width, Height, Levels, Usage, Format, Pool, &textureHandle, pSharedHandle);
+
+	if (hr != S_OK)
+		return hr;
+
+	ID3D12Resource* pResource12 = nullptr;
+	IsUploadingTextureData = true;
+	DX8Wrapper::device9On12->UnwrapUnderlyingResource(
+		textureHandle,
+		D3D12Renderer->graphics_queue->dx_queue, 
+		__uuidof(ID3D12Resource),
+		reinterpret_cast<void**>(&pResource12)
+	);
+	IsUploadingTextureData = false;
+	*ppTexture = new wwDeviceTexture(textureHandle, pResource12);
+
+	return S_OK;
+}
+
+wwDeviceTexture * DX8Wrapper::_Create_DX8_Texture(
 	IDirect3DSurface8 *surface,
 	TextureClass::MipCountType mip_level_count)
 {
 	DX8_THREAD_ASSERT();
 	DX8_Assert();
-	IDirect3DTexture8 *texture = NULL;
+	wwDeviceTexture *texture = NULL;
 
 	D3DSURFACE_DESC surface_desc;
 	::ZeroMemory(&surface_desc, sizeof(D3DSURFACE_DESC));
@@ -2278,7 +2497,7 @@ IDirect3DTexture8 * DX8Wrapper::_Create_DX8_Texture(
 
 	// Create mipmaps if needed
 	if (mip_level_count!=TextureClass::MIP_LEVELS_1) {
-		DX8_ErrorCode(D3DXFilterTexture(texture, NULL, 0, D3DX_FILTER_BOX));
+		DX8_ErrorCode(D3DXFilterTexture(texture->GetWrappedTexture(), NULL, 0, D3DX_FILTER_BOX));
 	}
 
 	return texture;
@@ -2385,7 +2604,7 @@ void DX8Wrapper::_Copy_DX8_Rects(
 				D3DX_FILTER_NONE, 0));
 			if (SUCCEEDED(res))
 			{
-				IDirect3DTexture8* pTexture = nullptr;
+				IDirect3DTexture9* pTexture = nullptr;
 				if (SUCCEEDED(pDestinationSurface->GetContainer(IID_IDirect3DBaseTexture9, (void**)&pTexture)) && pTexture)
 				{
 					pTexture->AddDirtyRect(&destRect);
@@ -2437,7 +2656,7 @@ void DX8Wrapper::_Update_Texture(TextureClass *system, TextureClass *video)
 	WWASSERT(video);
 	WWASSERT(system->Pool==TextureClass::POOL_SYSTEMMEM);
 	WWASSERT(video->Pool==TextureClass::POOL_DEFAULT);
-	DX8CALL(UpdateTexture(system->D3DTexture,video->D3DTexture));
+	DX8CALL(UpdateTexture(system->D3DTexture->GetWrappedTexture(),video->D3DTexture->GetWrappedTexture()));
 }
 
 void DX8Wrapper::Compute_Caps(D3DFORMAT display_format,D3DFORMAT depth_stencil_format)
@@ -2446,6 +2665,33 @@ void DX8Wrapper::Compute_Caps(D3DFORMAT display_format,D3DFORMAT depth_stencil_f
 	DX8_Assert();
 	DX8Caps::Compute_Caps(display_format,depth_stencil_format,D3DDevice);	
 }
+
+HRESULT DX8Wrapper::SetTexture(DWORD stage, wwDeviceTexture* texture) {
+	Set_DX8_Texture(stage, texture);
+	return S_OK;
+}
+
+void DX8Wrapper::Set_DX8_Texture(unsigned int stage, wwDeviceTexture* texture)
+{
+	if (Textures[stage] == texture) return;
+
+	SNAPSHOT_SAY(("DX8 - SetTexture(%x) \n", texture));
+
+	if (Textures[stage]) Textures[stage]->Release();
+	Textures[stage] = texture;
+	if (Textures[stage]) Textures[stage]->AddRef();
+
+	if (texture)
+	{
+		DX8CALL(SetTexture(stage, texture->GetWrappedTexture()));
+	}
+	else
+	{
+		DX8CALL(SetTexture(stage, NULL));
+	}
+	DX8_RECORD_TEXTURE_CHANGE();
+}
+
 
 void DX8Wrapper::Set_Light(unsigned index,const LightClass &light)
 {

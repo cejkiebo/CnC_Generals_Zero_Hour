@@ -2,7 +2,7 @@ set(GAMERENDERER_SOURCES
     dx12/tinydx.cpp
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
-    imgui/imgui_impl_dx9.cpp
+    imgui/imgui_impl_dx12.cpp
     imgui/imgui_impl_win32.cpp
     imgui/imgui_tables.cpp
     imgui/imgui_widgets.cpp
@@ -16,6 +16,7 @@ set(GAMERENDERER_SOURCES
     dx8/dx8webbrowser.cpp
     dx8/dx8wrapper.cpp
     dx8/dx8timer.cpp
+    dx8/dx8rendertarget.cpp
 )
 
 set(GAMERENDERER_HEADERS
@@ -46,6 +47,7 @@ target_include_directories(GameRenderer PRIVATE
     .
     ../Libraries/DX90SDK/Include
     ../Libraries/Include
+    ../Libraries/Pix/Include
     ../Libraries/Source/
     ../Libraries/Source/Compression
     ../Libraries/Source/GameSpy

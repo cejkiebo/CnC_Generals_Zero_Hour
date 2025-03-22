@@ -171,7 +171,7 @@ void TextureLoader::Validate_Texture_Size(unsigned& width, unsigned& height)
 
 
 
-IDirect3DTexture8* TextureLoader::Load_Thumbnail(const StringClass& filename,WW3DFormat texture_format)
+wwDeviceTexture* TextureLoader::Load_Thumbnail(const StringClass& filename,WW3DFormat texture_format)
 {
 	ThumbnailClass* thumb=ThumbnailClass::Peek_Instance(filename);
 	if (!thumb) {
@@ -193,7 +193,7 @@ IDirect3DTexture8* TextureLoader::Load_Thumbnail(const StringClass& filename,WW3
 		WWASSERT(dest_format==texture_format);
 	}
 
-	IDirect3DTexture8* d3d_texture = DX8Wrapper::_Create_DX8_Texture(
+	wwDeviceTexture* d3d_texture = DX8Wrapper::_Create_DX8_Texture(
 		thumb->Get_Width(),
 		thumb->Get_Height(),
 		dest_format,
@@ -261,7 +261,7 @@ static bool Is_Power_Of_Two(unsigned i)
 // ----------------------------------------------------------------------------
 
 // TODO: Legacy - remove this call!
-IDirect3DTexture8* Load_Compressed_Texture(
+wwDeviceTexture* Load_Compressed_Texture(
 	const StringClass& filename, 
 	unsigned reduction_factor,
 	TextureClass::MipCountType mip_level_count,
@@ -281,7 +281,7 @@ IDirect3DTexture8* Load_Compressed_Texture(
 	// Note that the nearest valid format could be anything, even uncompressed.
 	if (dest_format==WW3D_FORMAT_UNKNOWN) dest_format=Get_Valid_Texture_Format(dds_file.Get_Format(),true);
 
-	IDirect3DTexture8* d3d_texture = DX8Wrapper::_Create_DX8_Texture(
+	wwDeviceTexture* d3d_texture = DX8Wrapper::_Create_DX8_Texture(
 		width,
 		height,
 		dest_format,
@@ -312,7 +312,7 @@ IDirect3DSurface8* TextureLoader::Load_Surface_Immediate(
 	bool compressed=Is_Format_Compressed(texture_format,allow_compression);
 
 	if (compressed) {
-		IDirect3DTexture8* comp_tex=Load_Compressed_Texture(filename,0,TextureClass::MIP_LEVELS_1,WW3D_FORMAT_UNKNOWN);
+		wwDeviceTexture* comp_tex=Load_Compressed_Texture(filename,0,TextureClass::MIP_LEVELS_1,WW3D_FORMAT_UNKNOWN);
 		if (comp_tex) {
 			IDirect3DSurface8* d3d_surface=NULL;
 			DX8_ErrorCode(comp_tex->GetSurfaceLevel(0,&d3d_surface));
@@ -776,7 +776,7 @@ static DWORD VectortoRGBA( D3DXVECTOR3* v, FLOAT fHeight )
     return( (a<<24L) + (r<<16L) + (g<<8L) + (b<<0L) );
 }
 
-IDirect3DTexture8* TextureLoader::Generate_Bumpmap(TextureClass* texture)
+wwDeviceTexture* TextureLoader::Generate_Bumpmap(TextureClass* texture)
 {
 	WW3DFormat bump_format=WW3D_FORMAT_U8V8;
 	if (!DX8Caps::Support_Texture_Format(bump_format)) {
@@ -784,13 +784,13 @@ IDirect3DTexture8* TextureLoader::Generate_Bumpmap(TextureClass* texture)
 	}
 
 	D3DSURFACE_DESC desc;
-	IDirect3DTexture8* src_d3d_tex=texture->Peek_DX8_Texture();
+	wwDeviceTexture* src_d3d_tex=texture->Peek_DX8_Texture();
 	WWASSERT(src_d3d_tex);
 	DX8_ErrorCode(src_d3d_tex->GetLevelDesc(0,&desc));
 	unsigned width=desc.Width;
 	unsigned height=desc.Height;
 
-	IDirect3DTexture8* d3d_texture = DX8Wrapper::_Create_DX8_Texture(
+	wwDeviceTexture* d3d_texture = DX8Wrapper::_Create_DX8_Texture(
 		width,
 		height,
 		bump_format,
@@ -1029,57 +1029,23 @@ void TextureLoadTaskClass::Begin_Texture_Load()
 
 		bool loaded=false;
 		if (Texture->Is_Compression_Allowed()) {
-			DDSFileClass dds_file(Texture->Get_Full_Path(),Get_Reduction());
-			if (dds_file.Is_Available()) {
-				// Destination size will be the next power of two square from the larger width and height...
-				unsigned width, height;
-				width=dds_file.Get_Width(0);
-				height=dds_file.Get_Height(0);
-				TextureLoader::Validate_Texture_Size(width,height);
-
-				// If the size doesn't match, try and see if texture reduction would help... (mainly for
-				// cases where loaded texture is larger than hardware limit)
-				if (width!=dds_file.Get_Width(0) || height!=dds_file.Get_Height(0)) {
-					for (unsigned i=1;i<dds_file.Get_Mip_Level_Count();++i) {
-						unsigned w=dds_file.Get_Width(i);
-						unsigned h=dds_file.Get_Height(i);
-						TextureLoader::Validate_Texture_Size(width,height);
-						if (w==dds_file.Get_Width(i) || h==dds_file.Get_Height(i)) {
-							Reduction+=i;
-							width=w;
-							height=h;
-							break;
-						}
-					}
+			file_auto_ptr file(_TheFileFactory, Texture->Get_Full_Path());
+			if (!strstr(file->File_Path(), ".tga")) {
+				file->Open();
+				int len = file->Seek(0, SEEK_END);
+				file->Seek(0, SEEK_SET);
+				void* buffer = malloc(len);
+				file->Read(buffer, len);
+				
+				if (DX8Wrapper::CreateTextureDDS(buffer, len, 0, D3DPOOL_DEFAULT, Width, Height, MipLevelCount ,&D3DTexture) == S_OK)
+				{
+					file->Close();
+					End_Load();
+					Apply(true);
+					Add_Task_To_Delete_List(this);
+					return;
 				}
-
-				IsLoading=true;
-				Width=width;
-				Height=height;
-				Format=Get_Valid_Texture_Format(dds_file.Get_Format(),Texture->Is_Compression_Allowed());
-
-				unsigned mip_level_count=Get_Mip_Level_Count();
-				// If texture wants all mip levels, take as many as the file contains (not necessarily all)
-				// Otherwise take as many mip levels as the texture wants, not to exceed the count in file...
-				if (!mip_level_count) mip_level_count=dds_file.Get_Mip_Level_Count();
-				else if (mip_level_count>dds_file.Get_Mip_Level_Count()) mip_level_count=dds_file.Get_Mip_Level_Count();
-
-				// Once more, verify that the mip level count is correct (in case it was changed here it might not
-				// match the size...well actually it doesn't have to match but it can't be bigger than the size)
-				unsigned max_mip_level_count=1;
-				unsigned w=4;
-				unsigned h=4;
-				while (w<Width && h<Height) {
-					w+=w;
-					h+=h;
-					max_mip_level_count++;
-				}
-				if (mip_level_count>max_mip_level_count) mip_level_count=max_mip_level_count;
-
-				D3DTexture=DX8Wrapper::_Create_DX8_Texture(Width,Height,Format,(TextureClass::MipCountType)mip_level_count);
-				MipLevelCount=mip_level_count;
-				//Texture->MipLevelCount);
-				loaded=true;
+				file->Close();
 			}
 		}
 
@@ -1272,7 +1238,7 @@ void TextureLoadTaskClass::Set_Succ(TextureLoadTaskClass* succ)
 //
 // ----------------------------------------------------------------------------
 
-void TextureLoadTaskClass::Set_D3D_Texture(IDirect3DTexture8* texture)
+void TextureLoadTaskClass::Set_D3D_Texture(wwDeviceTexture* texture)
 {
 	WWASSERT(D3DTexture==0);
 	D3DTexture=texture;
