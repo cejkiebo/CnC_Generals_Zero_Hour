@@ -305,7 +305,7 @@ SortingVertexBufferClass::~SortingVertexBufferClass()
 DX8VertexBufferClass::DX8VertexBufferClass(unsigned FVF, unsigned short vertex_count_, UsageType usage)
 	:
 	VertexBufferClass(BUFFER_TYPE_DX8, FVF, vertex_count_),
-	VertexBuffer(NULL)
+	VertexBuffer()
 {
 	usageType = usage;
 	Create_Vertex_Buffer(usage);
@@ -410,10 +410,10 @@ DX8VertexBufferClass::~DX8VertexBufferClass()
 }
 
 IDirect3DVertexBuffer8* DX8VertexBufferClass::Get_DX8_Vertex_Buffer() {
-	if (usageType != USAGE_DYNAMIC)
+	//if (usageType != USAGE_DYNAMIC)
 		return VertexBuffer[0];
 
-	return VertexBuffer[DX8Wrapper::Get_FrameCount() % DX8_VERTEXBUFFER_COUNT];
+	//return VertexBuffer[DX8Wrapper::Get_FrameCount() % DX8_VERTEXBUFFER_COUNT];
 }
 
 // ----------------------------------------------------------------------------
